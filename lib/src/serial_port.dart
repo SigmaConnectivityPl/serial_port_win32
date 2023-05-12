@@ -548,6 +548,11 @@ class SerialPort {
   /// [close] port which was opened
   void close() {
     CloseHandle(handler!);
+    
+    // SIGMA
+    // Clear the cache when closing the ports
+    _cache.clear();
+
     _isOpened = false;
   }
 

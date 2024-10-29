@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:ffi';
-import 'dart:typed_data';
 import 'package:win32/win32.dart';
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart';
 
 class SerialPort {
   /// [portName] like COM3
@@ -34,7 +34,7 @@ class SerialPort {
   /// staus
   final _status = calloc<COMSTAT>();
 
-  /// [_keyPath] is registry path which will be oepned
+  /// [_keyPath] is registry path which will be opened
   static final _keyPath = TEXT("HARDWARE\\DEVICEMAP\\SERIALCOMM");
 
   /// [isOpened] is true when port was opened, [CreateFile] function will open a port.
@@ -45,12 +45,12 @@ class SerialPort {
   static final Map<String, SerialPort> _cache = <String, SerialPort>{};
 
   /// stream data
-  late Stream<Uint8List> _readStream;
+  Stream<Uint8List>? _readStream;
 
-  /// [readOnListenFunction] define what  to do when data comming
+  /// [readOnListenFunction] define what  to do when data coming
   Function(Uint8List value) readOnListenFunction = (value) {};
 
-  /// [readOnBeforeFunction] define what  to do when data comming
+  /// [readOnBeforeFunction] define what  to do when data coming
   Function() readOnBeforeFunction = () {};
 
   /// read data which has size [_readBytesSize]
@@ -110,7 +110,7 @@ class SerialPort {
         portName,
         () => SerialPort._internal(
               portName,
-              TEXT(portName),
+              TEXT('\\\\.\\$portName'),
               BaudRate: BaudRate,
               Parity: Parity,
               StopBits: StopBits,
@@ -148,8 +148,8 @@ class SerialPort {
       ..ref.ByteSize = ByteSize;
     commTimeouts
       ..ref.ReadIntervalTimeout = 10
-      ..ref.ReadTotalTimeoutConstant = 1
-      ..ref.ReadTotalTimeoutMultiplier = 0;
+      ..ref.ReadTotalTimeoutMultiplier = 10
+      ..ref.ReadTotalTimeoutConstant = 1;
     if (openNow) {
       open();
     }
@@ -157,6 +157,7 @@ class SerialPort {
 
   /// [open] can be called when handler is null or handler is closed
   void open() {
+    /// Do not open a port which has been opened
     if (_isOpened == false) {
       handler = CreateFile(_portNameUtf16, GENERIC_READ | GENERIC_WRITE, 0,
           nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
@@ -166,7 +167,7 @@ class SerialPort {
         if (lastError == ERROR_FILE_NOT_FOUND) {
           throw Exception(_portNameUtf16.toDartString() + "is not available");
         } else {
-          throw Exception('Last error is $lastError');
+          throw Exception('Open port failed, error is $lastError');
         }
       }
 
@@ -180,25 +181,20 @@ class SerialPort {
         throw Exception('SetCommMask error');
       }
       _createEvent();
-
-      _readStream = _lookUpEvent(Duration(milliseconds: 1));
-      _readStream.listen((event) {
-        readOnListenFunction(event);
-      });
     } else {
-      throw Exception('Port is opened');
+      throw Exception('Port has been opened');
     }
   }
 
-  /// look up I/O event and read data using stream
+  /// [_lookUpEvent] will look up I/O event and read data using stream
   Stream<Uint8List> _lookUpEvent(Duration interval) async* {
     int event = 0;
     Uint8List data;
-    PurgeComm(handler!, PURGE_RXCLEAR | PURGE_TXCLEAR);
+    // PurgeComm(handler!, PURGE_RXCLEAR | PURGE_TXCLEAR);
     while (true) {
       await Future.delayed(interval);
       event = WaitCommEvent(handler!, _dwCommEvent, _over);
-      if (event != 0) {
+      if (event != FALSE) {
         ClearCommError(handler!, _errors, _status);
         if (_status.ref.cbInQue < _readBytesSize) {
           data = await _read(_status.ref.cbInQue);
@@ -210,19 +206,29 @@ class SerialPort {
         }
       } else {
         if (GetLastError() == ERROR_IO_PENDING) {
-          if (WaitForSingleObject(_over.ref.hEvent, 500) == 0) {
-            ClearCommError(handler!, _errors, _status);
-            if (_status.ref.cbInQue < _readBytesSize) {
-              data = await _read(_status.ref.cbInQue);
+          /// wait io complete, timeout in 500ms
+          for (int i = 0; i < 1000; i++) {
+            if (WaitForSingleObject(_over.ref.hEvent, 0) == 0) {
+              ClearCommError(handler!, _errors, _status);
+              if (_status.ref.cbInQue < _readBytesSize) {
+                data = await _read(_status.ref.cbInQue);
+              } else {
+                data = await _read(_readBytesSize);
+              }
+              if (data.isNotEmpty) {
+                yield data;
+              }
+              ResetEvent(_over.ref.hEvent);
+              // break for next read operation.
+              break;
             } else {
-              data = await _read(_readBytesSize);
-            }
-
-            if (data.isNotEmpty) {
-              yield data;
+              ResetEvent(_over.ref.hEvent);
+              // continue waiting
+              await Future.delayed(interval);
             }
           }
-          ResetEvent(_over.ref.hEvent);
+        } else {
+          /// Fallback
         }
       }
     }
@@ -382,51 +388,125 @@ class SerialPort {
 
   /// [setFlowControlSignal] can set DTR and RTS signal
   /// Controlling DTR and RTS
-  void setFlowControlSignal(int flag){
-      EscapeCommFunction(handler!, flag);
+  void setFlowControlSignal(int flag) {
+    EscapeCommFunction(handler!, flag);
   }
 
   /// [_read] is a fundamental read function/
   Future<Uint8List> _read(int bytesSize) async {
-    final lpBuffer = calloc<Uint16>(bytesSize);
+    final lpBuffer = calloc<Uint8>(bytesSize);
     Uint8List uint8list;
-
     try {
       readOnBeforeFunction();
       ReadFile(handler!, lpBuffer, bytesSize, _bytesRead, _over);
     } finally {
       /// Uint16 need to be casted for real Uint8 data
-      uint8list = lpBuffer.cast<Uint8>().asTypedList(_bytesRead.value);
+      var u8l = lpBuffer.asTypedList(_bytesRead.value);
+
+      /// Copy data
+      uint8list = Uint8List.fromList(u8l);
       free(lpBuffer);
     }
 
     return uint8list;
   }
 
-  /// [readBytesOnce] read data only once.
-  Future<Uint8List> readBytesOnce(int bytesSize) async {
-    return _read(bytesSize);
-  }
-
-  /// [readBytesOnListen] can constantly listen data, you can use [onData] to get data.
+  /// [readBytesOnListen] can listen data in polling mode, endless loop, you can use [onData] to get data.
+  /// - [dataPollingInterval] set data polling interval
   void readBytesOnListen(int bytesSize, Function(Uint8List value) onData,
-      {void onBefore()?}) {
+      {void onBefore()?,
+      Duration dataPollingInterval = const Duration(microseconds: 500)}) {
     _readBytesSize = bytesSize;
     readOnListenFunction = onData;
     readOnBeforeFunction = onBefore ?? () {};
+
+    _readStream = _lookUpEvent(dataPollingInterval);
+    _readStream!.listen((event) {
+      readOnListenFunction(event);
+    });
+  }
+
+  /// [readBytesUntil] will read until an [expected] sequence is found
+  Future<Uint8List> readBytesUntil(Uint8List expected,
+      {Duration dataPollingInterval =
+          const Duration(microseconds: 500)}) async {
+    /// either [readBytesOnListen] or [readBytesUntil]
+    if (_readStream != null) {
+      throw Exception("You have used listen function");
+    }
+
+    int event = 0;
+    List<int> readData = List<int>.empty(growable: true);
+    final expectedListLength = expected.length;
+
+    while (true) {
+      event = WaitCommEvent(handler!, _dwCommEvent, _over);
+      if (event != FALSE) {
+        ClearCommError(handler!, _errors, _status);
+        if (_status.ref.cbInQue != 0) {
+          readData.add((await _read(1))[0]);
+        } else {
+          /// do nothing
+        }
+      } else {
+        if (GetLastError() == ERROR_IO_PENDING) {
+          /// wait io complete, timeout in 500ms
+          for (int i = 0; i < 1000; i++) {
+            if (WaitForSingleObject(_over.ref.hEvent, 0) == 0) {
+              ClearCommError(handler!, _errors, _status);
+              if (_status.ref.cbInQue != 0) {
+                readData.add((await _read(1))[0]);
+              } else {}
+              ResetEvent(_over.ref.hEvent);
+              // break for next read operation.
+              break;
+            } else {
+              ResetEvent(_over.ref.hEvent);
+              // continue waiting
+              await Future.delayed(dataPollingInterval);
+            }
+          }
+        } else {
+          /// Fallback
+        }
+      }
+      if (readData.length < expectedListLength) {
+        continue;
+      } else {
+        if (listEquals(
+            readData.sublist(readData.length - expectedListLength), expected)) {
+          return Uint8List.fromList(readData);
+        } else {
+          await Future.delayed(dataPollingInterval);
+          continue;
+        }
+      }
+    }
   }
 
   /// [writeBytesFromString] will convert String to ANSI Code corresponding to char
-  /// Serial devices can receive ANSI code
-  /// if you write "hello" in String, device will get "hello\0" with "\0" automatically.
-  bool writeBytesFromString(String buffer) {
+  ///
+  /// if you write "hello" in String, PC will send "hello\0" with "\0" automatically when set includeZeroTerminator true.
+  ///
+  /// - Unit of [timeout] is ms
+  bool writeBytesFromString(String buffer,
+      {int timeout = 500, required bool includeZeroTerminator}) {
     final lpBuffer = buffer.toANSI();
     final lpNumberOfBytesWritten = calloc<DWORD>();
+    final int length;
+
+    if (includeZeroTerminator == true) {
+      length = lpBuffer.length + 1;
+    } else {
+      length = lpBuffer.length;
+    }
+
     try {
-      if (WriteFile(handler!, lpBuffer, lpBuffer.length + 1,
+      if (WriteFile(handler!, lpBuffer.cast<Uint8>(), length,
               lpNumberOfBytesWritten, _over) !=
           TRUE) {
-        return false;
+        return _getOverlappedResult(
+            handler!, _over, lpNumberOfBytesWritten, timeout);
       }
       return true;
     } finally {
@@ -437,14 +517,17 @@ class SerialPort {
 
   /// [writeBytesFromUint8List] will write Uint8List directly, please ensure the last
   /// of list is 0 terminator if you want to convert it to char.
-  bool writeBytesFromUint8List(Uint8List uint8list) {
+  bool writeBytesFromUint8List(Uint8List uint8list, {int timeout = 500}) {
     final lpBuffer = uint8list.allocatePointer();
     final lpNumberOfBytesWritten = calloc<DWORD>();
+
     try {
       if (WriteFile(handler!, lpBuffer, uint8list.length,
               lpNumberOfBytesWritten, _over) !=
           TRUE) {
-        return false;
+        /// Overlapped will cause IO_PENDING
+        return _getOverlappedResult(
+            handler!, _over, lpNumberOfBytesWritten, timeout);
       }
       return true;
     } finally {
@@ -453,16 +536,33 @@ class SerialPort {
     }
   }
 
+  /// [_getOverlappedResult] will get write result in non-blocking mode
+  /// 500 ms
+  bool _getOverlappedResult(int handler, Pointer<OVERLAPPED> lpOverlapped,
+      Pointer<Uint32> lpNumberOfBytesTransferred, int timeout) {
+    for (int i = 0; i < timeout; i++) {
+      Future.delayed(Duration(milliseconds: 1));
+      if (GetOverlappedResult(handler, _over, lpNumberOfBytesTransferred, 0) ==
+          TRUE) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// [_getRegistryKeyValue] will open RegistryKey in Serial Path.
   static int _getRegistryKeyValue() {
     final hKeyPtr = calloc<IntPtr>();
+    int lResult;
     try {
-      if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, _keyPath, 0, KEY_READ, hKeyPtr) !=
-          ERROR_SUCCESS) {
-        RegCloseKey(hKeyPtr.value);
-        throw Exception("can't open Register");
+      lResult =
+          RegOpenKeyEx(HKEY_LOCAL_MACHINE, _keyPath, 0, KEY_READ, hKeyPtr);
+      if (lResult != ERROR_SUCCESS) {
+        // RegCloseKey(hKeyPtr.value);
+        throw Exception("RegistryKeyValue Not Found");
+      } else {
+        return hKeyPtr.value;
       }
-      return hKeyPtr.value;
     } finally {
       free(hKeyPtr);
     }
@@ -521,8 +621,14 @@ class SerialPort {
   static List<String> getAvailablePorts() {
     /// availablePorts String list
     List<String> portsList = [];
+    final int hKey;
 
-    final hKey = _getRegistryKeyValue();
+    /// Get registry key of Serial Port
+    try {
+      hKey = _getRegistryKeyValue();
+    } on Exception {
+      return List.empty();
+    }
 
     /// The index of the value to be retrieved.
     /// This parameter should be zero for the first call to the RegEnumValue function and then be incremented for subsequent calls.
@@ -543,6 +649,131 @@ class SerialPort {
     RegCloseKey(hKey);
 
     return portsList;
+  }
+
+  /// Using [getPortsWithFullMessages] to get Serial Ports Info
+  /// Parameter: {String classGUIDStr = GUID_DEVINTERFACE_COMPORT}, refer to https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-comport
+  /// You can set classGUIDStr = GUID_DEVINTERFACE_USB_DEVICE
+  /// return [PortInfo({
+  ///     required this.portName,
+  ///     required this.friendlyName,
+  ///     required this.hardwareID,
+  //     required this.manufactureName,
+  ///   })];
+  static List<PortInfo> getPortsWithFullMessages(
+      {String classGUIDStr = GUID_DEVINTERFACE_COMPORT}) {
+    /// Storage port information
+    var portInfoLists = <PortInfo>[];
+
+    /// Set Class GUID
+    final classGUID = calloc<GUID>();
+    classGUID.ref.setGUID(classGUIDStr);
+
+    /// Get Device info handle
+    final hDeviceInfo = SetupDiGetClassDevs(
+        classGUID, nullptr, 0, DIGCF_DEVICEINTERFACE | DIGCF_PRESENT);
+
+    if (hDeviceInfo != INVALID_HANDLE_VALUE) {
+      /// Init device info data
+      final devInfoData = calloc<SP_DEVINFO_DATA>();
+      devInfoData.ref.cbSize = sizeOf<SP_DEVINFO_DATA>();
+
+      /// Enum device
+      for (var i = 0;
+          SetupDiEnumDeviceInfo(hDeviceInfo, i, devInfoData) == TRUE;
+          i++) {
+        /// Init [PortName] and [friendlyName] Pointer
+        final portName = calloc<Uint8>(256);
+        final pcbData = calloc<DWORD>()..value = 255;
+        final friendlyName = calloc<BYTE>(256);
+        final hardwareID = calloc<BYTE>(256);
+        final manufactureName = calloc<BYTE>(256);
+
+        /// [SP_DEVICE_INTERFACE_DATA] in dart
+        // final deviceInterfaceData = calloc<SP_DEVICE_INTERFACE_DATA>();
+        // deviceInterfaceData.ref.cbSize = sizeOf<SP_DEVICE_INTERFACE_DATA>();
+        //
+        // final deviceInterfaceDetailData =
+        //     calloc<SP_DEVICE_INTERFACE_DETAIL_DATA_>(1024);
+        // deviceInterfaceDetailData.ref.cbSize =
+        //     sizeOf<SP_DEVICE_INTERFACE_DETAIL_DATA_>();
+
+        try {
+          var hDevKey = SetupDiOpenDevRegKey(hDeviceInfo, devInfoData,
+              DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ);
+
+          if (hDevKey != INVALID_HANDLE_VALUE) {
+            RegQueryValueEx(
+                hDevKey, TEXT("PortName"), nullptr, nullptr, portName, pcbData);
+            RegCloseKey(hDevKey);
+          }
+
+          /// Get friendly name
+          if (SetupDiGetDeviceRegistryProperty(
+                  hDeviceInfo,
+                  devInfoData,
+                  SPDRP.SPDRP_FRIENDLYNAME,
+                  nullptr,
+                  friendlyName,
+                  255,
+                  nullptr) !=
+              TRUE) {
+            continue;
+          }
+
+          /// Get Hardware ID
+          if (SetupDiGetDeviceRegistryProperty(hDeviceInfo, devInfoData,
+                  SPDRP.SPDRP_HARDWAREID, nullptr, hardwareID, 255, nullptr) !=
+              TRUE) {
+            continue;
+          }
+
+          /// Get MFG
+          if (SetupDiGetDeviceRegistryProperty(hDeviceInfo, devInfoData,
+                  SPDRP.SPDRP_MFG, nullptr, manufactureName, 255, nullptr) !=
+              TRUE) {
+            continue;
+          }
+
+          // if (SetupDiEnumDeviceInterfaces(hDeviceInfo, devInfoData, classGUID, i, deviceInterfaceData) != TRUE) {
+          //   continue;
+          // }
+          //
+          // if (SetupDiGetDeviceInterfaceDetail(hDeviceInfo, deviceInterfaceData, deviceInterfaceDetailData, 1023, nullptr, nullptr) != TRUE) {
+          //   continue;
+          // }
+
+          /// Convert Wchar to String
+          final String portNameStr = portName.cast<Utf16>().toDartString();
+          final String friendlyNameStr =
+              friendlyName.cast<Utf16>().toDartString();
+          // final String interfaceDetailDataStr = deviceInterfaceDetailData.ref.DevicePath;
+          // print(interfaceDetailDataStr);
+          final String hardwareIDStr = hardwareID.cast<Utf16>().toDartString();
+          final String manufactureNameStr =
+              manufactureName.cast<Utf16>().toDartString();
+
+          /// add to lists
+          portInfoLists.add(PortInfo(
+              portName: portNameStr,
+              friendlyName: friendlyNameStr,
+              hardwareID: hardwareIDStr,
+              manufactureName: manufactureNameStr));
+        } finally {
+          free(portName);
+          free(pcbData);
+          free(friendlyName);
+          free(hardwareID);
+          free(manufactureName);
+          // free(deviceInterfaceData);
+          // free(deviceInterfaceDetailData);
+        }
+      }
+
+      /// [Destroy Device Info List]
+      SetupDiDestroyDeviceInfoList(hDeviceInfo);
+    }
+    return portInfoLists;
   }
 
   /// [close] port which was opened
@@ -578,5 +809,30 @@ class SerialPort {
       _closeController.close();
     }
     return _closeSubscription;
+  }
+}
+
+/// [PortInfo] storages [portName], [friendlyName], [hardwareID], [manufactureName]
+/// [hardwareID] Refer to https://learn.microsoft.com/en-us/windows-hardware/drivers/install/hardware-ids
+class PortInfo {
+  /// COM Port Name like [COM1]
+  final String portName;
+
+  /// Friendly name in windows property
+  final String friendlyName;
+
+  final String hardwareID;
+  final String manufactureName;
+
+  const PortInfo({
+    required this.portName,
+    required this.friendlyName,
+    required this.hardwareID,
+    required this.manufactureName,
+  });
+
+  @override
+  String toString() {
+    return 'Port Name: $portName, FriendlyName: $friendlyName, hardwareID: $hardwareID, manufactureName: $manufactureName';
   }
 }

@@ -1,3 +1,62 @@
+## 1.4.0
+
+- require `includeZeroTerminator` parameter for clear write function.
+- update dependency versions for bugs fixed
+
+
+## 1.3.0
+
+- fix bugs
+- add `readBytesUntil` function
+- add more option when read or write
+- update docs
+
+## 1.2.0
+
+- update read performance
+- add timeout option in write function
+
+## 1.1.0
+
+- remove `readBytesOnce` Function to fix async race
+- Don't purge com before read. Some computers may purge com after read in async mode.
+
+## 1.0.0
+
+- Temporarily remove readBytesOnListen for bugs, using `readBytesOnce` instead.
+
+## 0.7.0
+
+- add query for hardwareID(include VID and PID ), MFG(manufacture name)
+- can query different class GUID
+
+## 0.6.0
+
+- add [getPortsWithFullMessages] functions
+- plan to support VID and PID
+- can get friendly name of port
+
+## 0.5.4
+
+- catch registry not found exception
+
+## 0.5.3
+
+- update packages: win32 & ffi
+- Maintenance updates
+- doc updates
+
+## 0.5.2
+
+- bug fixed
+  - write operation always return false
+
+## 0.5.1
+
+- bug fixed
+  - random data due to pointer free
+  - open greater than COM9
+
 ## 0.5.0
 
 - add Flow Control

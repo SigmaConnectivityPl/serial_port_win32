@@ -14,11 +14,25 @@ print(ports);
 /// result like [COM3, COM4]
 ```
 
+### Get Ports with more messages (Experiment)
+```dart
+final List<PortInfo> ports = SerialPort.getPortsWithFullMessages();
+print(ports); 
+/// print [Port Name: COM3, FriendlyName: 蓝牙链接上的标准串行 (COM3), hardwareID: BTHENUM\{00001101-0000-1000-8000-00803f9b55fb}_LOCALMFG&0000, manufactureName: Microsoft]
+
+PortInfo({
+required this.portName,
+required this.friendlyName,
+required this.hardwareID,
+required this.manufactureName,
+});
+```
+
 ### Create Serial Port
 The port instance is **Singleton Pattern**. Don't re-create port for same Com name.
 
 ```dart
-final port = SerialPort("COM5", openNow: false, ByteSize: 8);
+final port = SerialPort("COM5", openNow: false, ByteSize: 8, ReadIntervalTimeout: 1, ReadTotalTimeoutConstant: 2);
 // port.open()
 port.openWithSettings(BaudRate: CBR_115200);
 // final port = SerialPort("COM5"); /// auto open with default settings
@@ -38,19 +52,13 @@ port.ReadIntervalTimeout = 10;
 ### Read
 
 ```dart
-port.readBytesOnListen(8, (value) => print(value));
-// or
+port.readBytesSize = 8;
 port.readOnListenFunction = (value) {
-  print(value);
+print(value);
 };
-// port.readOnListenFunction = (value) {
-//   print(value);
-// };
-// Future.delayed(Duration(seconds: 5)).then((value) {
-//   port.writeBytesFromString('close');
-//   sleep(Duration(seconds: 1));
-//   port.close();
-// });
+// or
+// can only choose one function
+print(await port.readBytesUntil(Uint8List.fromList("\n".codeUnits)));
 ```
 
 ### Write
@@ -104,6 +112,12 @@ port.closeOnListen(
     print(port.isOpened);
   });
 ```
+
+### Attention
+
+If you want to read or write strings using serial, be careful to handle the terminator at the end.
+
+Although in most cases, like "Hello\0" (68 65 6C 6C 6F 00) and "Hello"(68 65 6C 6C 6F) both can be identified by computer.
 
 ### Small Example
 

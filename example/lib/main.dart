@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:serial_port_win32/serial_port_win32.dart';
@@ -33,23 +34,44 @@ class _MyHomePageState extends State<MyHomePage> {
   var ports = <String>[];
   late SerialPort port;
 
+  final sendData = Uint8List.fromList(List.filled(4, 1, growable: false));
+
   String data = '';
 
   void _getPortsAndOpen() {
+    final List<PortInfo> portInfoLists = SerialPort.getPortsWithFullMessages();
     ports = SerialPort.getAvailablePorts();
+
+    print(portInfoLists);
+    print(ports);
     if (ports.isNotEmpty) {
-      port = SerialPort(ports[0]);
+      port = SerialPort("COM8", openNow: false);
       port.open();
-      print(port.isOpened);
-      port.readBytesOnListen(8, (value) {
-        data = value.toString();
-        setState(() {});
-      });
+      // print(port.isOpened);
+      // port.readBytesOnListen(16, (value) {
+      //   data = String.fromCharCodes(value);
+      //   print(DateTime.now());
+      //   print(data);
+      //   setState(() {});
+      // });
+      //
+      // port.readBytesOnListen(16, (value) {
+      //   data = String.fromCharCodes(value);
+      //   print(DateTime.now());
+      //   print(data);
+      //   setState(() {});
+      // });
     }
     setState(() {});
-    // setState(() {
-    //   ports = SerialPort.getAvailablePorts();
-    // });
+  }
+
+  void _send() async {
+    if (!port.isOpened) {
+      port.open();
+    }
+    port.writeBytesFromString("AT", includeZeroTerminator: false);
+    print(await port.readBytesUntil(Uint8List.fromList("T".codeUnits)));
+    port.close();
   }
 
   @override
@@ -69,7 +91,7 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
             Text(
               ports.toString(),
-              style: Theme.of(context).textTheme.headline4,
+              style: Theme.of(context).textTheme.headlineMedium,
             ),
             Text(data),
             ElevatedButton(
@@ -77,6 +99,12 @@ class _MyHomePageState extends State<MyHomePage> {
                 port.close();
               },
               child: Text("close"),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                _send();
+              },
+              child: Text("write"),
             ),
           ],
         ),
